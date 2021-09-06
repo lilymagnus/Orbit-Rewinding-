@@ -66,7 +66,8 @@ def makeLMC(Mlmc):
 
 def simLMC(potmw, potlmc, lmcparams):
     Mlmc = potlmc.totalMass()
-    #recall agama units: 1 solar mass = 232500 & 1kpc = 1                                           
+    #recall agama units: 1 solar mass = 232500 & 1kpc = 1
+    Rlmc = Mlmc**0.6 * 8.5
     fudge_fact = (Mlmc/(10**4/232500))**0.1 * 9.
     def difeq(t, vars):
         x0=vars[0:3]  # MW pos

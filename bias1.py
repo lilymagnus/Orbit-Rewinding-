@@ -27,7 +27,8 @@ def makeLMC(Mlmc):
 def simLMC(potmw, potlmc, lmcparams):
     Mlmc = potlmc.totalMass() 
     #recall agama units: 1 solar mass = 232500 & 1kpc = 1
-    fudge_fact = (Mlmc/(10**4/232500))**0.1 * 9.
+    #fudge_fact = (Mlmc/(10**4/232500))**0.1 * 9.
+    Rlmc = Mlmc**0.6 * 8.5
     def difeq(t, vars):
         x0=vars[0:3]  # MW pos
         v0=vars[3:6]  # MW vel
@@ -39,8 +40,8 @@ def simLMC(potmw, potlmc, lmcparams):
         f1=potmw.force(dx)
         vmag  = sum((v1-v0)**2)**0.5
         rho   = potmw.density(dx)
-        sigma = 125/(1+dr/125) #100.0
-        couLog= max(0, np.log(dr/fudge_fact))
+        sigma = 150/(1+dr/100) #100.0
+        couLog= max(0, np.log(dr/Rlmc))
         X     = vmag / (sigma * 2**.5)
         drag  = -4*np.pi * rho / vmag * (scipy.special.erf(X) - 2/np.pi**.5 * X * np.exp(-X*X)) * Mlmc / vmag**2 * couLog
         return np.hstack((v0, f0, v1, f1 + (v1-v0)*drag))
@@ -50,7 +51,7 @@ def simLMC(potmw, potlmc, lmcparams):
     Tstep  = 1./128
     tgrid = np.linspace(Tbegin, Tfinal, round((Tfinal-Tbegin)/Tstep)+1)
     ic = np.hstack((np.zeros(6),  # MW
-                    [-0.5, -40.8, -27.2, -64.3, -213.4, -208.5]))  # LMC
+                    [-0.5, -40.8, -27.2, -64.3, -213.4, 208.5]))  # LMC
     sol = scipy.integrate.solve_ivp(difeq, (Tbegin, Tfinal)[::-1], ic, t_eval=tgrid[::-1], max_step=Tstep,
                                     rtol=1e-12, method='LSODA').y.T[::-1]
     '''
