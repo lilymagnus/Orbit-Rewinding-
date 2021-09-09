@@ -9,6 +9,13 @@ from scipy.optimize import minimize
 from multiprocessing import Pool
 from scipy import stats, integrate, special
 
+
+######## GLOBAL VARIABLES ##########
+npoints = 6
+nsamples = 20
+norbits = 100
+vel_error = 20
+
 ############ GLOBAL DF & DENSITY TRUE VALUES ######################
 # true potential of the Milky Way
 pot_true=agama.Potential(type='spheroid', gamma=1.0, beta=3.5, alpha=0.6, scaleradius= 7.0, densitynorm=1700, outercutoffradius=300)
@@ -80,7 +87,7 @@ def simLMC(potmw, potlmc, lmcparams):
         f1=potmw.force(dx)
         vmag  = sum((v1-v0)**2)**0.5
         rho   = potmw.density(dx)
-        couLog= max(0, numpy.log(dr / (2*Rlmc)))
+        couLog= max(0, np.log(dr / (2*Rlmc)))
         sigma = 150/(1+dr/100) #100.0
         X     = vmag / (sigma * 2**.5)
         drag  = -4*np.pi * rho / vmag * (scipy.special.erf(X) - 2/np.pi**.5 * X * np.exp(-X*X)) * Mlmc / vmag**2 * couLog
@@ -136,14 +143,14 @@ def rewind_orb(potmw, potlmc, lmcparams, lmc_mass, df_file):
     
     # orbits in the original simulation for a selection of 10000 particles (keep only the first 100 here)
     times = np.load('mwslmc' + str(lmc_mass) +'/' + df_file + 'traj.npz')['times']  # timestamps from -3 Gyr to present (t=0)
-    orb_orig = np.load('mwslmc' + str(lmc_mass) +'/' + df_file + 'traj.npz')['trajs'][:200]  # shape: (Norbits, Ntimes, 6)
+    orb_orig = np.load('mwslmc' + str(lmc_mass) +'/' + df_file + 'traj.npz')['trajs'][:norbits]  # shape: (Norbits, Ntimes, 6)
     
     #rewind the orbits to obtain the present posvels
     orb_rewind = np.dstack(agama.orbit(potential=pot, ic=orb_orig[:,0],
                 time=times[0], timestart=times[-1], trajsize=len(times))[:,1]).swapaxes(1,2).swapaxes(0,1)
     
-    posvel_rewind_t3 = orb_rewind[0:200,0,:]
-    posvel_rewind_t0 = orb_rewind[0:200,48,:]
+    posvel_rewind_t3 = orb_rewind[0:norbits,0,:]
+    posvel_rewind_t0 = orb_rewind[0:norbits,48,:]
 
     return posvel_rewind_t3
 
@@ -157,18 +164,24 @@ def data(lmc_mass, df_file):
     lcmparams = dict(type='spheroid',mass = 645000, scaleradius=10.8395,outercutoffradius=108.395,gamma=1,beta=3)
     #lcmparams = polib.pofile('potentials_triax/lmc00.pot')
 
-    posvel_rewind = rewind_orb(potmw, potlmc, lcmparams, lmc_mass, df_file)
+    #posvel_rewind = rewind_orb(potmw, potlmc, lcmparams, lmc_mass, df_file)
     
     times = np.load('mwslmc' + str(lmc_mass) +'/' + df_file + 'traj.npz')['times']  # timestamps from -3 Gyr to present (t=0)
-    orb_orig = np.load('mwslmc' + str(lmc_mass) +'/' + df_file + 'traj.npz')['trajs'][:200]  # shape: (Norbits, Ntimes, 6)
-    posvel_mw_t0 = orb_orig[0:200,48,:]
-    posvel_mw_t3 = orb_orig[0:200,0,:]
-        
-    return potmw, posvel_rewind
+    orb_orig = np.load('mwslmc' + str(lmc_mass) +'/' + df_file + 'traj.npz')['trajs'][:norbits]  # shape: (Norbits, Ntimes, 6)
+    posvel_mw_t0 = orb_orig[0:norbits,48,:]
+    posvel_mw_t3 = orb_orig[0:norbits,0,:]
+
+    
+    #perturb the mock data vels. by +/- 20km/s
+    vel_noise = np.random.normal(0., 20,(len(posvel_mw_t0), 3))
+    posvel_mw_t0[:,3:6] += vel_noise
+    
+    return potmw, posvel_mw_t0
 
 
 #find the likelihood of the paramters given the mock data
 def log_probability(params, posvel, df_type, lmc_mass, df_file):
+    
     try:
         #check if potential is spherical
         if lmc_mass == 15:
@@ -185,33 +198,31 @@ def log_probability(params, posvel, df_type, lmc_mass, df_file):
                 df, rho_s =  create_df(params[6:], potmw, df_type)
             else:
                 df = create_df(params[6:], potmw, df_type)
-        
-        posvel = rewind_orb(potmw, potlmc,lmcparams, lmc_mass, df_file)
-        # check if the DF is everywhere nonnegative
-        j = np.logspace(-2,8,200)
-        if any(df(np.column_stack((j, j*0+1e-10, j*0))) <= 0):
-            raise Exception("Bad DF")
-         
+
+        pot_mw_plus_lmc = simLMC(potmw, potlmc, lmcparams)
+        Tbegin = -3.0  # initial evol time [Gyr]
+        Tfinal =  0.   # current time 
+        #rewind the orbits to obtain pos/vel at Tbegin (take only the last point of the trajectory)
+        posvel_rewind = np.vstack(agama.orbit(potential=pot_mw_plus_lmc, ic=posvel, time=Tbegin-Tfinal, timestart=Tfinal, trajsize=2)[:,1])[1::2]
+        print(posvel_rewind.shape)
         actfinder = agama.ActionFinder(potmw)
-        action = actfinder(posvel)
+        action = actfinder(posvel_rewind)
         
-        if np.any(np.isnan(action)):
-            print("Error action")
+        df_samples = df(action).reshape(-1, nsamples)   # now this is a 2d array with one row per catalogue point
+        df_points = np.mean(np.nan_to_num(df_samples), axis=1)  # average over all samples for each point, replacing nan's with zeroes
             
     except Exception as E:
         print(E)
         return -np.inf
 
-    df = df(action)
-    #check that all energies are negative
-    if  np.isnan(df).any():
-        #print("fail")
-        return -np.inf
-    
-    else:
-        a = np.sum(np.log(df))
-        print(a)
-        return a
+    #df = df(action)
+
+    df_samples = df(action).reshape(norbits, nsamples)   # now this is a 2d array with one row per catalogue point
+    df_points = np.mean(np.nan_to_num(df_samples), axis=1)  # average over all samples for each point, replacing nan's with zeroes
+
+    #a = np.sum(np.log(df))
+    logL = np.sum(np.log(df_points))
+    return logL
     
     
 # function to maximize
@@ -287,6 +298,9 @@ def main():
     #data from simulation
     pot_data, posvel_data = data(mass_lmc, df_file)
 
+    posvel_subsamples = np.repeat(posvel_data, nsamples, axis=0)  # shape: (npoints*num_subsamples, 6)
+    posvel_subsamples[:,3:6] += np.random.normal(0, vel_error, size=(len(posvel_subsamples), 3))
+    
     """
     #params for spherical
     if df_type == "Sph":
@@ -295,6 +309,7 @@ def main():
         #params for doublepowerlaw
         params = [6.25,1,1,1,10,1,10, 1, 1, 1, 1, 1, 1, 0, 5]
     """
+    
     params = np.genfromtxt(df_type + '/params' + str(mass_lmc) + '_' + df_file + '.txt')
      
     posx = posvel_data[:,0]
@@ -326,13 +341,16 @@ def main():
     Nwalker, Ndim = 50,len(params)
     p0 = params+1.e-4*np.random.randn(50, len(params))
 
-    #sampler = emcee.EnsembleSampler(Nwalker, Ndim, log_probability, args=(posvel_data,df_type,mass_lmc, df_file,))
-    #sampler.run_mcmc(p0, 100, progress=True)
+    
+    sampler = emcee.EnsembleSampler(Nwalker, Ndim, log_probability, args=(posvel_subsamples,df_type,mass_lmc, df_file,))
+    sampler.run_mcmc(p0, 100, progress=True)
+
+    """
     
     with Pool() as pool:
-        sampler = emcee.EnsembleSampler(Nwalker, Ndim, log_probability, args=(posvel_data,df_type,mass_lmc, df_file,),pool=pool)
-        sampler.run_mcmc(p0, 1100, progress=True)
-
+        sampler = emcee.EnsembleSampler(Nwalker, Ndim, log_probability, args=(posvel_subsamples,df_type,mass_lmc, df_file,),pool=pool)
+        sampler.run_mcmc(p0, 100, progress=True)
+    """
     samples = sampler.get_chain()    
     #chain = sampler.get_chain(thin=10,discard= 100, flat=True)
     chain = sampler.get_chain(flat=True)
@@ -461,9 +479,9 @@ def main():
     ax[0].legend()
     ax[1].legend()
     if df_type == "Sph":
-        plt.savefig("Sph/rewind" + str(mass_lmc) + "_" + df_file + "_sph.png")
+        plt.savefig("Sph/rewind_err" + str(mass_lmc) + "_" + df_file + "_sph.png")
     else:
-        plt.savefig("DPL/rewind" + str(mass_lmc) + "_" + df_file +"_DPL.png")
+        plt.savefig("DPL/rewind_err" + str(mass_lmc) + "_" + df_file +"_DPL.png")
 
     ####### plot walkers in parameter space #####   
     fig, axes = plt.subplots(len(params), figsize=(10, 7), sharex=True)
@@ -489,21 +507,21 @@ def main():
     fig.tight_layout(h_pad=0.)
     axes[-1].set_xlabel("step number")
     if df_type == "Sph":
-        plt.savefig("Sph/rewind" + str(mass_lmc) + df_file + "_emcee_sph.png")
+        plt.savefig("Sph/rewind_err" + str(mass_lmc) + df_file + "_emcee_sph.png")
     else:
-        plt.savefig("DPL/rewind" + str(mass_lmc) + df_file + "_emcee_DPL.png")
+        plt.savefig("DPL/rewind_err" + str(mass_lmc) + df_file + "_emcee_DPL.png")
 
 
     ##### corner plots ######
-    
+    breakpoint()
     label=['Mmw_true','Mlmc_true','beta0_true']
-    true_vals = [1,1,0.5]
+    true_vals = [6.5,1,-0.2]
     params = params[:,(0,1,6)]
     fig = corner.corner(params, labels=label, truths=true_vals )
     if df_type == "Sph":
-        plt.savefig("Sph/corner" + str(mass_lmc) + df_file + "sph.png")
+        plt.savefig("Sph/corner_err" + str(mass_lmc) + df_file + "sph.png")
     else:
-        plt.savefig("DPL/corner" + str(mass_lmc) + df_file + "DPL.png")
+        plt.savefig("DPL/corner_err" + str(mass_lmc) + df_file + "DPL.png")
     
 main()
         
